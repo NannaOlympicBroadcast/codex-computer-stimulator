@@ -3,10 +3,191 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>计算机模拟器</title>
-    <script type="module" src="/src/main.js"></script>
+    <title>32位 ALU 模拟器（单页）</title>
+    <style>
+      :root { font-family: "Inter", "Microsoft YaHei", sans-serif; color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0f1220; color: #e9ecff; }
+      .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      .muted { color: #9aa3c7; margin-bottom: 20px; }
+      .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+      .panel { background: #171b30; border: 1px solid #2a3054; border-radius: 12px; padding: 14px; }
+      label { display: block; margin: 10px 0 6px; font-size: 13px; color: #b8c0e8; }
+      input, select, button { width: 100%; border-radius: 8px; border: 1px solid #364078; background: #0f1430; color: #eef1ff; padding: 10px; }
+      button { margin-top: 10px; cursor: pointer; background: #3447d6; border-color: #4e61f5; }
+      button:hover { background: #4156eb; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { border-bottom: 1px solid #2a3054; padding: 8px 6px; text-align: left; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+      .signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+      .sig { background: #11162b; border: 1px solid #29305b; border-radius: 8px; padding: 8px; }
+      .timeline { max-height: 360px; overflow: auto; }
+      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div class="wrap">
+      <h1>32位整数 ALU 模拟器</h1>
+      <div class="muted">支持加/减/乘/除，逐步展示控制信号、数据通路与寄存器状态（补码、32位）。</div>
+      <div class="grid">
+        <section class="panel">
+          <label>A（十进制，int32）</label>
+          <input id="a" type="number" value="15" />
+          <label>B（十进制，int32）</label>
+          <input id="b" type="number" value="3" />
+          <label>操作</label>
+          <select id="op">
+            <option value="ADD">ADD（A + B）</option>
+            <option value="SUB">SUB（A - B）</option>
+            <option value="MUL">MUL（A × B）</option>
+            <option value="DIV">DIV（A ÷ B）</option>
+          </select>
+          <button id="run">运行仿真</button>
+          <button id="step">下一拍</button>
+          <button id="auto">自动播放</button>
+        </section>
+
+        <section class="panel">
+          <h3>当前寄存器</h3>
+          <table id="regs" class="mono"></table>
+          <h3>当前信号线</h3>
+          <div id="signals" class="signals mono"></div>
+        </section>
+      </div>
+
+      <section class="panel" style="margin-top:16px;">
+        <h3>时序步骤（微操作）</h3>
+        <div id="timeline" class="timeline mono"></div>
+      </section>
+    </div>
+
+    <script>
+      const S = { steps: [], i: 0, timer: null };
+      const regsEl = document.getElementById('regs');
+      const sigEl = document.getElementById('signals');
+      const timelineEl = document.getElementById('timeline');
+
+      const i32 = (n) => n | 0;
+      const u32 = (n) => n >>> 0;
+      const bin32 = (n) => (u32(n)).toString(2).padStart(32, '0');
+
+      function snapshot(name, regs, sig, note) {
+        return { name, regs: { ...regs }, sig: { ...sig }, note };
+      }
+
+      function buildSteps(aIn, bIn, op) {
+        const a = i32(Number(aIn));
+        const b = i32(Number(bIn));
+        const regs = { PC: 0, IR: op, MAR: 0, MDR: 0, A: a, B: b, ALUOut: 0, HI: 0, LO: 0, Q: 0, R: 0, FLAGS: 'Z0N0C0V0' };
+        const sig = { BusA: 0, BusB: 0, ALUCtrl: 'NOP', RegWrite: 0, MemRead: 0, MemWrite: 0, Overflow: 0, DivZero: 0 };
+        const out = [];
+
+        out.push(snapshot('IF', regs, sig, '取指：IR <- op'));
+        out.push(snapshot('ID', regs, sig, '译码：读取 A, B'));
+
+        const setFlags = (res, carry = 0, overflow = 0) => {
+          const z = i32(res) === 0 ? 1 : 0;
+          const n = i32(res) < 0 ? 1 : 0;
+          regs.FLAGS = `Z${z}N${n}C${carry}V${overflow}`;
+          sig.Overflow = overflow;
+        };
+
+        if (op === 'ADD' || op === 'SUB') {
+          const bb = op === 'SUB' ? i32(~b + 1) : b;
+          sig.ALUCtrl = op;
+          sig.BusA = a; sig.BusB = bb;
+          out.push(snapshot('EX1', regs, sig, op === 'SUB' ? 'SUB通过加法器实现：A + (~B + 1)' : '加法器输入锁存'));
+          const sumU = u32(a) + u32(bb);
+          const res = i32(sumU);
+          regs.ALUOut = res; sig.RegWrite = 1;
+          const carry = sumU > 0xFFFFFFFF ? 1 : 0;
+          const overflow = (((a ^ res) & (bb ^ res)) < 0) ? 1 : 0;
+          setFlags(res, carry, overflow);
+          out.push(snapshot('EX2/WB', regs, sig, 'ALUOut写回并更新标志位'));
+        }
+
+        if (op === 'MUL') {
+          sig.ALUCtrl = 'MUL';
+          let multiplicand = BigInt(i32(a));
+          let multiplier = BigInt(u32(b));
+          let acc = 0n;
+          for (let k = 0; k < 32; k++) {
+            sig.BusA = Number(multiplicand & 0xFFFFFFFFn);
+            sig.BusB = Number(multiplier & 0xFFFFFFFFn);
+            if (multiplier & 1n) acc += multiplicand;
+            out.push(snapshot(`MUL${k + 1}`, regs, sig, `检查Q0=${Number(multiplier & 1n)}，若1则部分积+=被乘数；随后左移/右移`));
+            multiplicand <<= 1n;
+            multiplier >>= 1n;
+          }
+          const mask = (1n << 64n) - 1n;
+          const p = acc & mask;
+          regs.HI = Number((p >> 32n) & 0xFFFFFFFFn) | 0;
+          regs.LO = Number(p & 0xFFFFFFFFn) | 0;
+          regs.ALUOut = regs.LO;
+          setFlags(regs.LO);
+          out.push(snapshot('WB', regs, sig, '乘法结束：HI:LO 写回（低32位作为ALUOut）'));
+        }
+
+        if (op === 'DIV') {
+          sig.ALUCtrl = 'DIV';
+          if (b === 0) {
+            sig.DivZero = 1;
+            out.push(snapshot('EX', regs, sig, '除零异常：DivZero=1'));
+            return out;
+          }
+          let q = Math.abs(a) >>> 0;
+          const d = Math.abs(b) >>> 0;
+          let r = 0;
+          for (let k = 0; k < 32; k++) {
+            r = ((r << 1) | ((q >>> 31) & 1)) >>> 0;
+            q = (q << 1) >>> 0;
+            if (r >= d) { r = (r - d) >>> 0; q |= 1; }
+            regs.Q = q | 0; regs.R = r | 0;
+            sig.BusA = regs.Q; sig.BusB = d | 0;
+            out.push(snapshot(`DIV${k + 1}`, regs, sig, '恢复余数除法：移位、减法、判符号、置商位'));
+          }
+          let qSigned = (q | 0), rSigned = (r | 0);
+          if ((a < 0) ^ (b < 0)) qSigned = i32(-qSigned);
+          if (a < 0) rSigned = i32(-rSigned);
+          regs.LO = qSigned; regs.HI = rSigned; regs.ALUOut = qSigned;
+          setFlags(qSigned);
+          out.push(snapshot('WB', regs, sig, '除法结束：LO=商，HI=余数'));
+        }
+        return out;
+      }
+
+      function render() {
+        const st = S.steps[Math.min(S.i, S.steps.length - 1)];
+        if (!st) return;
+        regsEl.innerHTML = '<tr><th>寄存器</th><th>值(十进制)</th><th>值(二进制32位)</th></tr>' +
+          Object.entries(st.regs).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td><td>${typeof v === 'number' ? bin32(v) : v}</td></tr>`).join('');
+        sigEl.innerHTML = Object.entries(st.sig).map(([k, v]) => `<div class="sig"><b>${k}</b><br>${v}</div>`).join('');
+
+        timelineEl.innerHTML = S.steps.map((x, idx) => {
+          const on = idx === S.i ? 'style="color:#7bf1a8"' : '';
+          return `<div ${on}>[${idx}] ${x.name}: ${x.note}</div>`;
+        }).join('');
+      }
+
+      document.getElementById('run').onclick = () => {
+        S.steps = buildSteps(document.getElementById('a').value, document.getElementById('b').value, document.getElementById('op').value);
+        S.i = 0; clearInterval(S.timer); S.timer = null; render();
+      };
+      document.getElementById('step').onclick = () => {
+        if (!S.steps.length) return;
+        S.i = Math.min(S.i + 1, S.steps.length - 1); render();
+      };
+      document.getElementById('auto').onclick = () => {
+        if (!S.steps.length) return;
+        if (S.timer) { clearInterval(S.timer); S.timer = null; return; }
+        S.timer = setInterval(() => {
+          if (S.i >= S.steps.length - 1) { clearInterval(S.timer); S.timer = null; return; }
+          S.i++; render();
+        }, 500);
+      };
+
+      document.getElementById('run').click();
+    </script>
   </body>
-  </html>
+</html>
