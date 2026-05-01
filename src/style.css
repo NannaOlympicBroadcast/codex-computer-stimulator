@@ -208,6 +208,40 @@ body { min-height: 100vh; }
 .trace-step.sep-step .tl { color: var(--muted); font-size: 10px; }
 .trace-step.sep-step .tv { color: var(--muted); }
 
+/* ─── Memory Ops Section in ALU input panel ─── */
+.mem-ops-section {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px dashed rgba(188,140,255,.35);
+  border-radius: 6px;
+  background: rgba(188,140,255,.04);
+}
+.mem-ops-title {
+  font-size: 11px;
+  color: var(--purple);
+  font-weight: 700;
+  letter-spacing: .06em;
+  margin-bottom: 8px;
+}
+.mem-ops-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.op-btn.mem-op {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--purple);
+  border-color: rgba(188,140,255,.35);
+  white-space: nowrap;
+  padding: 5px 10px;
+}
+.op-btn.mem-op:hover:not(:disabled) {
+  background: rgba(188,140,255,.15);
+  border-color: var(--purple);
+  color: #fff;
+}
+
 /* ─── Step Controls ─── */
 .step-controls {
   margin-top: 10px;

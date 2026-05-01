@@ -270,6 +270,137 @@ export function divSteps(a, b) {
   return steps;
 }
 
+// ─── LDA — Load Accumulator (走 Cache 访存) ────────────────────────────────────
+export function ldaSteps(addr, destReg, sim, event) {
+  const ir = destReg === 'ACC' ? 0x10 : 0x11;
+  const { offset, index, tag, blockBase } = event.parts;
+  const value = event.value;
+  const addrHex = `0x${addr.toString(16).toUpperCase().padStart(2,'0')}`;
+  const valHex  = `0x${value.toString(16).toUpperCase().padStart(2,'0')}`;
+  const tagBin  = tag.toString(2).padStart(Math.max(sim.tagBits,1),'0');
+  const idxLabel = sim.mode==='set'?'Set':sim.mode==='full'?'(无)':'Idx';
+  const out = [];
+
+  out.push(mk('fetch', '① 取指 LDA',
+    `读取 LDA 指令字节（IR ← 0x${ir.toString(16).toUpperCase()}），目标寄存器 = ${destReg}`,
+    {IR:ir}, {}, {RD_MEM:1, DATA_BUS:1}));
+
+  out.push(mk('decode', '② 译码 LDA',
+    `LDA：从内存装载至 ${destReg}，ALU 不参与运算`,
+    {IR:ir}, {}, {ALU_OP:0}));
+
+  out.push(mk('load', '③ 操作数地址 → MAR',
+    `MAR ← ${addrHex}（${sim.addressBits}位地址）`,
+    {IR:ir, MAR:addr}, {}, {DATA_BUS:1}));
+
+  out.push(mk('exec', '④ 地址分解 → 查 Cache',
+    `Tag=${tagBin}(${tag})  ${idxLabel}=${index}  Offset=${offset}`,
+    {IR:ir, MAR:addr}, {}, {DATA_BUS:1, RD_MEM:1}));
+
+  if (event.hit) {
+    out.push(mk('exec', `⑤ Cache 命中 ⚡  Line ${event.lineIdx}`,
+      `命中无需访问主存，直接从 Cache 取数`,
+      {IR:ir, MAR:addr}, {}, {DATA_BUS:1, RD_MEM:0}));
+  } else {
+    out.push(mk('exec', '⑤ Cache 缺失 ✕',
+      `Tag=${tagBin} 在 ${idxLabel}=${index} 中未找到，发起主存访问`,
+      {IR:ir, MAR:addr}, {}, {RD_MEM:1, DATA_BUS:1}));
+
+    if (event.evicted) {
+      out.push(mk('exec', `⑤' LRU 替换 Line ${event.evicted.line}`,
+        `LRU 选中受害者：原 B${event.evicted.blockNum}（Tag=${event.evicted.tag}）被替换`,
+        {IR:ir, MAR:addr}, {}, {RD_MEM:1, DATA_BUS:1}));
+    }
+
+    out.push(mk('exec', '⑥ 主存 → Cache 调块',
+      `从主存 0x${blockBase.toString(16).toUpperCase()} 起读 ${sim.blockSize} 字节，载入 Line ${event.lineIdx}`,
+      {IR:ir, MAR:addr}, {}, {RD_MEM:1, DATA_BUS:1}));
+  }
+
+  out.push(mk('exec', `⑦ MDR ← Cache[${event.lineIdx}][${offset}]`,
+    `从 Cache 行偏移取出字节：MDR ← ${valHex}（十进制 ${value}）`,
+    {IR:ir, MAR:addr, MDR:value}, {}, {DATA_BUS:1}));
+
+  const sR = (value & 0x80) ? 1 : 0;
+  const psw = {Z:value===0?1:0, N:sR, C:0, O:0, S:sR};
+  const writeSig = destReg==='ACC' ? {WR_ACC:1} : {WR_X:1};
+  const regUpdate = destReg==='ACC' ? {ACC:value} : {X:value};
+
+  out.push(mk('writeback', `⑧ ${destReg} ← MDR`,
+    `${destReg} ← ${value}（数据从总线送入 ${destReg}）`,
+    {IR:ir, MAR:addr, MDR:value, ...regUpdate},
+    {}, {DATA_BUS:1, ...writeSig}));
+
+  out.push(mk('flags', '⑨ 更新 PSW',
+    `根据装入字节设标志：Z=${psw.Z}, N=${psw.N}`,
+    {IR:ir, MAR:addr, MDR:value, ...regUpdate},
+    psw, {WR_PSW:1, ZERO:psw.Z, NEG:sR}));
+
+  return out;
+}
+
+// ─── STA — Store Accumulator (走 Cache 写主存) ────────────────────────────────
+export function staSteps(addr, accValue, sim, event) {
+  const ir = 0x12;
+  const value = accValue & 0xFF;
+  const { offset, index, tag, blockBase } = event.parts;
+  const addrHex = `0x${addr.toString(16).toUpperCase().padStart(2,'0')}`;
+  const valHex  = `0x${value.toString(16).toUpperCase().padStart(2,'0')}`;
+  const tagBin  = tag.toString(2).padStart(Math.max(sim.tagBits,1),'0');
+  const idxLabel = sim.mode==='set'?'Set':sim.mode==='full'?'(无)':'Idx';
+  const out = [];
+
+  out.push(mk('fetch', '① 取指 STA',
+    `读取 STA 指令字节（IR ← 0x${ir.toString(16).toUpperCase()}）`,
+    {IR:ir, ACC:accValue}, {}, {RD_MEM:1, DATA_BUS:1}));
+
+  out.push(mk('decode', '② 译码 STA',
+    `STA：将 ACC 低8位写入指定内存地址`,
+    {IR:ir, ACC:accValue}, {}, {ALU_OP:0}));
+
+  out.push(mk('load', '③ 操作数地址 → MAR',
+    `MAR ← ${addrHex}`,
+    {IR:ir, ACC:accValue, MAR:addr}, {}, {DATA_BUS:1}));
+
+  out.push(mk('exec', '④ ACC[7:0] → MDR',
+    `MDR ← ${valHex}（待写入字节）`,
+    {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {DATA_BUS:1}));
+
+  out.push(mk('exec', '⑤ 地址分解 → 查 Cache',
+    `Tag=${tagBin}(${tag})  ${idxLabel}=${index}  Offset=${offset}`,
+    {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {DATA_BUS:1}));
+
+  if (event.hit) {
+    out.push(mk('exec', `⑥ Cache 命中 ⚡  Line ${event.lineIdx}`,
+      `直接更新 Cache 内的字节`,
+      {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {DATA_BUS:1}));
+  } else {
+    out.push(mk('exec', '⑥ Cache 缺失 ✕（写分配）',
+      `先调块到 Cache，再写入 — write-allocate 策略`,
+      {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {RD_MEM:1, DATA_BUS:1}));
+
+    if (event.evicted) {
+      out.push(mk('exec', `⑥' LRU 替换 Line ${event.evicted.line}`,
+        `LRU 选中受害者：B${event.evicted.blockNum} 被替换`,
+        {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {RD_MEM:1, DATA_BUS:1}));
+    }
+
+    out.push(mk('exec', '⑦ 主存 → Cache 调块',
+      `从主存 0x${blockBase.toString(16).toUpperCase()} 起读 ${sim.blockSize} 字节到 Line ${event.lineIdx}`,
+      {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {RD_MEM:1, DATA_BUS:1}));
+  }
+
+  out.push(mk('writeback', `⑧ Cache[${event.lineIdx}][${offset}] ← MDR`,
+    `Cache 字节更新：${valHex}`,
+    {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {DATA_BUS:1}));
+
+  out.push(mk('exec', '⑨ Memory[MAR] ← MDR (write-through)',
+    `主存对应字节同步更新（write-through 写穿透）`,
+    {IR:ir, ACC:accValue, MAR:addr, MDR:value}, {}, {DATA_BUS:1, RD_MEM:0}));
+
+  return out;
+}
+
 // ─── Float ADD / SUB — IEEE 754 ────────────────────────────────────────────────
 export function floatSteps(a, b, op) {
   const subtract = op === '-';

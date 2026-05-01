@@ -1,7 +1,7 @@
 import './style.css';
 import { IntegerALU, toBin32, toHex32 } from './alu-int.js';
 import { FloatALU, parseFloat32, toBin23 } from './alu-float.js';
-import { addSteps, subSteps, mulSteps, divSteps, floatSteps } from './steps.js';
+import { addSteps, subSteps, mulSteps, divSteps, floatSteps, ldaSteps, staSteps } from './steps.js';
 import { renderMemoryPage, bindMemoryEvents, memState } from './memory-page.js';
 
 const intALU   = new IntegerALU();
@@ -9,11 +9,12 @@ const floatALU = new FloatALU();
 
 // ─── App State ────────────────────────────────────────────────────────────────
 const state = {
-  page:   'alu',     // 'alu' | 'memory'
+  page:   'alu',
   mode:   'int',
   op:     '+',
   inputA: '25',
   inputB: '7',
+  memOpAddr: '0x10',  // 内存操作地址 (LDA/STA)
   // step engine
   stepList:     [],
   stepIdx:      -1,   // -1 = not started; 0..n = current step
@@ -90,6 +91,48 @@ function generateSteps() {
     state.error = e.message;
     state.stepList = [];
     state.stepIdx = -1;
+  }
+  render();
+}
+
+// ─── LDA / STA: ALU ⇄ Memory ─────────────────────────────────────────────────
+function loadFromMemory(destReg) {
+  state.error = '';
+  stopAuto();
+  try {
+    const sim = memState.sim;
+    const addr = parseIntInput(state.memOpAddr) & ((1 << sim.addressBits) - 1);
+    const event = sim.access(addr, 'read');
+    memState.lastEvent = event;
+    state.stepList = ldaSteps(addr, destReg, sim, event);
+    state.lastResult = null;
+    state.stepIdx = 0;
+    state.prevRegs = null;
+    state.prevSigs = null;
+    applyStep(0);
+  } catch (e) {
+    state.error = '地址解析失败: ' + e.message;
+  }
+  render();
+}
+
+function storeToMemory() {
+  state.error = '';
+  stopAuto();
+  try {
+    const sim = memState.sim;
+    const addr = parseIntInput(state.memOpAddr) & ((1 << sim.addressBits) - 1);
+    const accVal = state.regs.ACC & 0xFF;
+    const event = sim.access(addr, 'write', accVal);
+    memState.lastEvent = event;
+    state.stepList = staSteps(addr, state.regs.ACC, sim, event);
+    state.lastResult = null;
+    state.stepIdx = 0;
+    state.prevRegs = null;
+    state.prevSigs = null;
+    applyStep(0);
+  } catch (e) {
+    state.error = '地址解析失败: ' + e.message;
   }
   render();
 }
@@ -650,6 +693,23 @@ function render() {
         </div>
         ${error?`<div class="error-msg">⚠ ${error}</div>`:''}
         <button class="compute-btn" id="computeBtn">▶ 执行运算（生成步骤）</button>
+
+        <div class="mem-ops-section">
+          <div class="mem-ops-title">⇄ 内存交互（通过 MAR/MDR 走 Cache）</div>
+          <div class="mem-ops-row">
+            <div class="operand-grp" style="flex:1">
+              <label class="operand-label">内存地址 (0~${(1 << memState.sim.addressBits) - 1})</label>
+              <input class="operand-input" id="memOpAddrInput" type="text" value="${state.memOpAddr}"
+                placeholder="0x10 / 16"/>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <button class="op-btn mem-op" id="ldaAccBtn" title="LDA: 从该地址装载到 ACC">📥 LDA→ACC</button>
+              <button class="op-btn mem-op" id="ldaXBtn" title="LDA: 从该地址装载到 X">📥 LDA→X</button>
+              <button class="op-btn mem-op" id="staBtn" title="STA: 将 ACC 存入该地址">📤 STA←ACC</button>
+            </div>
+          </div>
+        </div>
+
         ${stepControls}
         ${descBox}
       </div>
@@ -711,6 +771,14 @@ function render() {
       render();
     });
   });
+
+  // ── Memory Op Bindings (LDA / STA) ──
+  document.getElementById('memOpAddrInput')?.addEventListener('input', e => {
+    state.memOpAddr = e.target.value;
+  });
+  document.getElementById('ldaAccBtn')?.addEventListener('click', () => loadFromMemory('ACC'));
+  document.getElementById('ldaXBtn')?.addEventListener('click',   () => loadFromMemory('X'));
+  document.getElementById('staBtn')?.addEventListener('click',    () => storeToMemory());
 
   // Step controls
   document.getElementById('resetBtn')?.addEventListener('click', resetSteps);
